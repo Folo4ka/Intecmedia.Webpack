@@ -4,7 +4,6 @@ const fs = require('fs');
 const realcwd = fs.realpathSync(process.cwd());
 if (process.cwd() !== realcwd) process.chdir(realcwd);
 
-const glob = require('glob');
 const path = require('path');
 const slash = require('slash');
 const webpack = require('webpack');
@@ -16,19 +15,20 @@ const logger = weblog({ name: 'webpack-config' });
 
 const ENV = require('./app.env.js');
 const APP = require('./app.config.js');
-const HTML_DATA = require('./source/html.data.js');
+
+ENV.SITEMAP = ENV.SITEMAP.map(i => Object.assign(i, {
+    path: path.posix.join(APP.PUBLIC_PATH, i.url, 'index.html'),
+}));
 
 if (ENV.STANDALONE) {
     logger.info(`Name: ${ENV.PACKAGE_NAME}`);
     logger.info(`Enviroment: ${ENV.NODE_ENV}`);
     logger.info(`Debug: ${ENV.DEBUG ? 'enabled' : 'disabled'}`);
-    logger.info(`Linters: ${ENV.USE_LINTERS ? 'enabled' : 'disabled'}`);
-    logger.info(`Source maps: ${ENV.USE_SOURCE_MAP ? 'enabled' : 'disabled'}`);
-    logger.info(`App config: ${JSON.stringify(APP, null, '    ')}`);
+    logger.info(`Config: ${JSON.stringify(APP, null, '    ')}`);
 }
 
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
-const HtmlWebpackPlugin = require('html-webpack-plugin');
+const HtmlWebpackPlugin = require('./plugin.html.js');
 const WebpackNotifierPlugin = require('webpack-notifier');
 const WorkboxPlugin = (APP.USE_SERVICE_WORKER ? require('workbox-webpack-plugin') : () => {});
 const ImageminPlugin = require('imagemin-webpack');
@@ -44,18 +44,11 @@ const UglifyJsPlugin = (ENV.PROD ? require('uglifyjs-webpack-plugin') : () => {}
 
 const FaviconsPlugin = (APP.USE_FAVICONS ? require('./plugin.favicons.js') : () => {});
 const PrettyPlugin = (APP.HTML_PRETTY ? require('./plugin.pretty.js') : () => {});
-const SvgoPlugin = require('./plugin.svgo.js');
 const BabelConfig = require('./babel.config.js');
 
 const SERVICE_WORKER_BASE = slash(path.relative(APP.PUBLIC_PATH, '/'));
 const SERVICE_WORKER_PATH = path.join(ENV.OUTPUT_PATH, SERVICE_WORKER_BASE, '/service-worker.js');
-const SERVICE_WORKER_HASH = () => (fs.existsSync(SERVICE_WORKER_PATH) ? md5File.sync(SERVICE_WORKER_PATH) : '');
-
-const SITEMAP = glob.sync(`${slash(ENV.SOURCE_PATH)}/**/*.html`, {
-    ignore: [
-        `${slash(ENV.SOURCE_PATH)}/partials/**/*.html`,
-    ],
-});
+APP.SERVICE_WORKER_HASH = () => (fs.existsSync(SERVICE_WORKER_PATH) ? md5File.sync(SERVICE_WORKER_PATH) : '');
 
 const resourceName = (prefix, hash = false) => {
     const basename = path.basename(prefix);
@@ -66,7 +59,7 @@ const resourceName = (prefix, hash = false) => {
             return slash(url + suffix);
         }
         if (url.startsWith(`${basename}/`)) {
-            return url + suffix;
+            return slash(url + suffix);
         }
         if (url.startsWith('node_modules/')) {
             return slash(path.join(basename, url + suffix));
@@ -87,7 +80,6 @@ module.exports = {
         },
         compress: false,
         contentBase: path.resolve(__dirname, 'source'),
-        open: true,
         overlay: { warnings: false, errors: true },
         watchContentBase: true,
     },
@@ -101,13 +93,14 @@ module.exports = {
         chunkFilename: 'js/[name].min.js',
         path: ENV.OUTPUT_PATH,
         publicPath: APP.PUBLIC_PATH,
+        hashFunction: 'md5',
     },
 
     optimization: {
         splitChunks: {
             cacheGroups: {
                 vendor: {
-                    test: /node_modules/,
+                    test: /(node_modules)(.+)\.(js|mjs)(\?.*)?$/,
                     chunks: 'initial',
                     name: 'vendor',
                     enforce: true,
@@ -137,19 +130,38 @@ module.exports = {
             return !(ignore.test(filename));
         },
         hints: 'warning',
-        maxAssetSize: 3 * 1024 * 1024,
+        maxAssetSize: Number.MAX_SAFE_INTEGER,
         maxEntrypointSize: 512 * 1024,
     } : false),
 
     plugins: [
-        ...(ENV.WATCH ? [new BrowserSyncPlugin()] : []),
+        ...(ENV.WATCH ? [
+            new BrowserSyncPlugin(),
+        ] : []),
         new CleanWebpackPlugin({
-            cleanOnceBeforeBuildPatterns: ['**/*', '!.gitkeep', '!.htaccess'],
+            cleanOnceBeforeBuildPatterns: (!ENV.WATCH ? ['**/*', '!.gitkeep', '!.htaccess'] : []),
             cleanAfterEveryBuildPatterns: ['**/*.br', '**/*.gz'],
         }),
         new MiniCssExtractPlugin({
             filename: 'css/app.min.css',
             allChunks: true,
+        }),
+        new CopyWebpackPlugin([
+            ...[
+                '**/.htaccess',
+                'img/**/*.{png,svg,ico,gif,xml,jpeg,jpg,json,webp}',
+                'partials/**/*.svg',
+                '*.txt',
+            ].map(from => ({
+                from,
+                to: ENV.OUTPUT_PATH,
+                context: ENV.SOURCE_PATH,
+                ignore: ENV.SITEMAP.map(i => i.template),
+            })),
+        ], {
+            copyUnmodified: !(ENV.PROD || ENV.DEBUG),
+            debug: (ENV.DEBUG ? 'debug' : 'info'),
+            force: true,
         }),
         ...(ENV.PROD ? [
             new CaseSensitivePathsPlugin(),
@@ -170,7 +182,7 @@ module.exports = {
             }),
         ] : []),
         new webpack.BannerPlugin({
-            banner: `ENV.NODE_ENV=${ENV.NODE_ENV} | ENV.DEBUG=${ENV.DEBUG} | chunkhash=[chunkhash]`,
+            banner: `ENV.NODE_ENV=${ENV.NODE_ENV} | ENV.DEBUG=${ENV.DEBUG}`,
         }),
         new webpack.ProvidePlugin({
             $: 'jquery',
@@ -210,49 +222,24 @@ module.exports = {
                 prefix: 'img/favicon/',
             }),
         ] : []),
-        ...(SITEMAP.map((template) => {
-            const basename = path.basename(template);
-            const filename = (basename === 'index.html' ? path.join(
-                ENV.OUTPUT_PATH,
-                path.relative(ENV.SOURCE_PATH, template),
-            ) : path.join(
-                ENV.OUTPUT_PATH,
-                path.relative(ENV.SOURCE_PATH, path.dirname(template)),
-                path.basename(template, '.html'),
-                'index.html',
-            ));
-            if (ENV.STANDALONE) {
-                logger.info(`${path.relative(__dirname, template)} --> ${path.relative(__dirname, filename)}`);
-            }
-            return new HtmlWebpackPlugin({
-                filename,
-                template,
-                inject: true,
-                minify: (APP.HTML_PRETTY ? {
-                    html5: true,
-                    collapseWhitespace: false,
-                    conservativeCollapse: false,
-                    removeComments: false,
-                    decodeEntities: false,
-                    minifyCSS: false,
-                    minifyJS: false,
-                    removeScriptTypeAttributes: true,
-                } : {
-                    html5: true,
-                    collapseWhitespace: true,
-                    conservativeCollapse: false,
-                    removeComments: true,
-                    decodeEntities: true,
-                    minifyCSS: true,
-                    minifyJS: true,
-                    removeScriptTypeAttributes: true,
-                }),
-                hash: true,
-                cache: !ENV.DEBUG,
-                title: APP.TITLE,
-            });
-        })),
-        new SvgoPlugin({ enabled: true }),
+        ...(ENV.SITEMAP.map(({ template, filename }) => new HtmlWebpackPlugin({
+            filename,
+            template,
+            inject: true,
+            minify: (ENV.PROD || ENV.DEBUG ? ({
+                html5: true,
+                collapseWhitespace: !APP.HTML_PRETTY,
+                conservativeCollapse: false,
+                removeComments: !APP.HTML_PRETTY,
+                decodeEntities: !APP.HTML_PRETTY,
+                minifyCSS: !APP.HTML_PRETTY,
+                minifyJS: !APP.HTML_PRETTY,
+                removeScriptTypeAttributes: true,
+            }) : false),
+            hash: ENV.PROD || ENV.DEBUG,
+            cache: !ENV.DEBUG,
+            title: APP.TITLE,
+        }))),
         ...(APP.HTML_PRETTY ? [new PrettyPlugin()] : []),
         ...(APP.USE_SERVICE_WORKER ? [new WorkboxPlugin.GenerateSW({
             cacheId: ENV.PACKAGE_NAME,
@@ -268,7 +255,8 @@ module.exports = {
                 'fonts/*.woff2',
             ],
             globIgnores: [
-                '*.map', '*.LICENSE',
+                '*.map',
+                '*.LICENSE',
             ],
             include: [],
             runtimeCaching: [{
@@ -299,77 +287,39 @@ module.exports = {
             }],
             ignoreUrlParametersMatching: [/^utm_/, /^[a-fA-F0-9]{32}$/],
         })] : []),
-        new CopyWebpackPlugin([
-            ...[
-                '**/.htaccess',
-                'img/**/*.{png,svg,ico,gif,xml,jpeg,jpg,json,webp}',
-                'partials/**/*.svg',
-                '*.txt',
-            ].map(from => ({
-                from,
-                to: ENV.OUTPUT_PATH,
-                context: ENV.SOURCE_PATH,
-                ignore: SITEMAP,
-            })),
-        ], {
-            copyUnmodified: !(ENV.PROD || ENV.DEBUG),
-            debug: (ENV.DEBUG ? 'debug' : 'info'),
-            force: true,
-        }),
         ...(ENV.PROD ? [new ImageminPlugin({
             test: /\.(jpeg|jpg|png|gif|svg)(\?.*)?$/i,
             exclude: /(fonts|font)/i,
-            name: resourceName('img', true),
+            name: resourceName('img'),
             imageminOptions: require('./imagemin.config.js'),
             cache: !ENV.DEBUG,
             loader: true,
         })] : []),
-        new BundleAnalyzerPlugin({
+        ...(ENV.PROD || ENV.DEBUG ? [new BundleAnalyzerPlugin({
             analyzerMode: (ENV.DEV_SERVER ? 'server' : 'static'),
             openAnalyzer: ENV.DEV_SERVER,
             reportFilename: path.join(__dirname, 'node_modules', '.cache', `bundle-analyzer-${ENV.NODE_ENV}.html`),
-        }),
+        })] : []),
     ],
 
     devtool: ENV.USE_SOURCE_MAP ? 'eval-source-map' : 'nosources-source-map',
 
-    resolve: {
-        ...require('./resolve.config.js'),
-    },
+    resolve: require('./resolve.config.js').resolve,
 
     module: {
         rules: [
             // html loaders
             {
-                test: /\.html(\?.*)?$/i,
+                test: /\.(html)(\?.*)?$/i,
                 loader: './loader.html.js',
                 options: {
-                    context: Object.assign(
-                        {},
-                        HTML_DATA,
-                        APP,
-                        {
-                            ENV,
-                            SERVICE_WORKER_HASH,
-                            DEBUG: ENV.DEBUG,
-                            NODE_ENV: ENV.NODE_ENV,
-                        },
-                    ),
+                    context: APP,
                     searchPath: ENV.SOURCE_PATH,
                 },
             },
             // javascript loaders
             {
                 test: require.resolve('jquery'),
-                exclude: {
-                    test: [
-                        // disable jquery expose
-                        path.join(__dirname, 'node_modules'),
-                    ],
-                    exclude: [
-                        // enable jquery expose
-                    ],
-                },
                 use: [{
                     loader: 'expose-loader',
                     options: 'jQuery',
@@ -429,49 +379,59 @@ module.exports = {
             },
             // image loaders
             {
-                test: /\.(jpeg|jpg|png|gif|svg)(\?.*)?$/i,
+                test: /\.(svg)(\?.*)?$/i,
+                issuer: /\.(html)(\?.*)?$/i,
+                include: /(partials)/i,
                 exclude: /(fonts|font)/i,
+                loader: './loader.svgo.js',
+                options: require('./svgo.config.js'),
+            },
+            {
+                test: /\.(jpeg|jpg|png|gif|svg)(\?.*)?$/i,
+                exclude: /(fonts|font|partials)/i,
                 oneOf: [
                     {
                         exclude: /\.(svg)$/i,
                         resourceQuery: /[&?]resize=.+/,
                         loader: './loader.resize.js',
-                        options: { name: resourceName('img', true), limit: 32 * 1024 },
+                        options: { name: resourceName('img'), limit: 32 * 1024 },
                     },
                     {
                         resourceQuery: /[&?]inline=inline/,
                         loader: 'url-loader',
-                        options: { name: resourceName('img', true), limit: 32 * 1024 },
+                        options: { name: resourceName('img'), limit: 32 * 1024 },
                     },
                     {
                         loader: 'file-loader',
-                        options: { name: resourceName('img', true) },
+                        options: { name: resourceName('img') },
                     },
                 ],
             },
             // font loaders
             {
                 test: /\.(eot|woff|woff2|ttf|svg)(\?.*)?$/i,
-                exclude: /(img|images)/i,
+                exclude: /(img|images|partials)/i,
                 loader: 'file-loader',
                 options: {
-                    name: resourceName('fonts', true),
+                    name: resourceName('fonts'),
                 },
             },
             // css loaders
             {
-                test: /\.(css|scss)$/i,
+                test: /\.(css|scss)(\?.*)?$/i,
                 loaders: (ENV.DEV_SERVER ? ['css-hot-loader'] : []).concat([
                     MiniCssExtractPlugin.loader,
                     {
                         loader: 'css-loader',
                         options: {
+                            importLoaders: 2,
                             sourceMap: ENV.USE_SOURCE_MAP,
                         },
                     },
                     {
                         loader: 'postcss-loader',
                         options: {
+                            ident: 'postcss',
                             sourceMap: ENV.USE_SOURCE_MAP ? 'inline' : false,
                             config: { path: './postcss.config.js' },
                         },

@@ -9,8 +9,7 @@ const nunjucks = require('nunjucks');
 const frontMatter = require('front-matter');
 const deepMerge = require('lodash.merge');
 
-const posthtml = require('posthtml');
-const posthtmlCommentAfter = require('posthtml-comment-after');
+const attrParser = require('./attr.parser.js');
 
 const helpers = require('./source/helpers/index.js');
 
@@ -36,9 +35,11 @@ const DEFAULT_OPTIONS = {
 
 const SRC_SEPARATOR = /\s+/;
 const SRCSET_SEPARATOR = /\s*,\s*/;
+const SRCSET_ATTRS = ['srcset', 'data-srcset'];
 const IGNORE_PATTERN = /^\{\{.*\}\}$/;
 const REQUIRE_PATTERN = /\{\{ require\([0-9\\.]+\) \}\}/g;
 const RANDOM_REQUIRE = () => `{{ require(${Math.random()}${Math.random()}) }}`;
+const SVG_PATTERN = /\.(svg)(\?.*)?$/i;
 
 const OPTIONS_SCHEMA = {
     type: 'object',
@@ -54,42 +55,40 @@ const OPTIONS_SCHEMA = {
 };
 
 function processHtml(html, options, loaderCallback) {
-    const parser = posthtml();
-    if (options.requireTags && Object.keys(options.requireTags).length) {
-        parser.use((tree) => {
-            const expression = Object.keys(options.requireTags).map(tag => ({
-                tag,
-                attrs: options.requireTags[tag].reduce((attrs, attr) => ({
-                    ...attrs,
-                    [attr]: true,
-                }), {}),
-            }));
-            tree.match(expression, (node) => {
-                options.requireTags[node.tag].forEach((attr) => {
-                    if (!(attr in node.attrs) || ('data-require-ignore' in node.attrs)) return;
+    const links = attrParser(html, (tag, attr) => {
+        if (!(tag in options.requireTags)) return false;
+        if (options.requireTags[tag].includes(attr)) return true;
+        return false;
+    });
 
-                    const val = node.attrs[attr];
-                    if (attr in ['srcset', 'data-srcset']) {
-                        node.attrs[attr] = val.split(SRCSET_SEPARATOR).map((src) => {
-                            const [url, size] = src.split(SRC_SEPARATOR, 2);
-                            if (IGNORE_PATTERN.test(url) || options.requireIgnore.test(url)) return src;
-                            return `${options.requireIdent(url)} ${size}`;
-                        }).join(', ');
-                    } else if (!IGNORE_PATTERN.test(val) && !options.requireIgnore.test(val)) {
-                        node.attrs[attr] = options.requireIdent(val);
-                    }
-                });
-                return node;
-            });
-            return tree;
-        });
-    }
-    parser.use(posthtmlCommentAfter());
-    parser.process(html).then((result) => {
-        let exportString = `export default ${JSON.stringify(result.html)};`;
-        exportString = options.requireExport(exportString);
-        loaderCallback(null, exportString);
-    }).catch(loaderCallback);
+    let content = [html];
+    links.reverse();
+    links.forEach((link) => {
+        let value;
+        if (SRCSET_ATTRS.includes(link.attr)) {
+            value = link.value.split(SRCSET_SEPARATOR).map((src) => {
+                const [url, size = ''] = src.split(SRC_SEPARATOR, 2);
+                if (IGNORE_PATTERN.test(url) || options.requireIgnore.test(url)) return src;
+                if (!loaderUtils.isUrlRequest(link.value, options.searchPath)) return src;
+                return options.requireIdent(url) + (size ? ` ${size}` : '');
+            }).join(', ');
+        } else {
+            if (IGNORE_PATTERN.test(link.value) || options.requireIgnore.test(link.value)) return;
+            if (!loaderUtils.isUrlRequest(link.value, options.searchPath)) return;
+            value = options.requireIdent(link.value);
+        }
+        const last = content.pop();
+        content.push(last.substr(link.start + link.length));
+        content.push(value);
+        content.push(last.substr(0, link.start));
+    });
+    content.reverse();
+    content = content.join('');
+
+    let exportString = `export default ${JSON.stringify(content)};`;
+    exportString = options.requireExport(exportString);
+
+    loaderCallback(null, exportString);
 }
 
 module.exports = function HtmlLoader() {
@@ -97,10 +96,14 @@ module.exports = function HtmlLoader() {
     if (loaderContext.cacheable) loaderContext.cacheable();
     const loaderCallback = loaderContext.async();
 
-    loaderContext.addDependency(path.join(__dirname, 'app.config.js'));
-    loaderContext.addDependency(path.join(__dirname, 'source', 'html.data.js'));
+    const htmlDataModule = require.resolve('./source/html.data.js');
+    loaderContext.addDependency(htmlDataModule);
+    delete require.cache[htmlDataModule];
 
-    const options = deepMerge({}, DEFAULT_OPTIONS, loaderUtils.getOptions(loaderContext));
+    const options = deepMerge({}, DEFAULT_OPTIONS, loaderUtils.getOptions(loaderContext), {
+        /* eslint-disable-next-line global-require, import/no-dynamic-require */
+        context: require(htmlDataModule),
+    });
     validateOptions(OPTIONS_SCHEMA, options, 'loader-html');
 
     const nunjucksLoader = new nunjucks.FileSystemLoader(options.searchPath, { noCache: true });
@@ -110,15 +113,21 @@ module.exports = function HtmlLoader() {
         let ident;
         do ident = RANDOM_REQUIRE();
         while (options.requireReplace[ident]);
-        options.requireReplace[ident] = url;
+        options.requireReplace[ident] = slash(url);
         return ident;
     };
     options.requireExport = exportString => exportString.replace(REQUIRE_PATTERN, (match) => {
         if (!options.requireReplace[match]) return match;
         const url = options.requireReplace[match];
-        logger.info(`require('${url}')`);
-        const request = loaderUtils.urlToRequest(url, options.searchPath);
-        return `"+require(${JSON.stringify(request)})+"`;
+
+        const relativeUrl = slash(path.relative(__dirname, url));
+        logger.info(`require(${JSON.stringify(relativeUrl)})`);
+
+        const resourceDir = path.dirname(loaderContext.resourcePath);
+        const urlPrefix = path.relative(resourceDir, options.searchPath);
+
+        const request = loaderUtils.urlToRequest(slash(path.join(urlPrefix, url)), resourceDir);
+        return `" + require(${JSON.stringify(request)}) + "`;
     });
 
     nunjucksEnvironment.addFilter('require', options.requireIdent);
@@ -129,12 +138,11 @@ module.exports = function HtmlLoader() {
     });
 
     const publicPath = ((options.context.APP || {}).PUBLIC_PATH || path.sep);
-    const resourcePath = path.sep + path.relative(options.searchPath, loaderContext.resourcePath);
-    const baseName = path.basename(resourcePath, '.html');
-    const resourceUrl = (
-        baseName === 'index'
-            ? path.dirname(resourcePath)
-            : path.dirname(resourcePath) + path.posix.sep + baseName
+    const resourcePath = path.posix.sep + path.relative(options.searchPath, loaderContext.resourcePath);
+    const baseName = path.basename(loaderContext.resourcePath, '.html');
+
+    const resourceUrl = path.dirname(resourcePath) + (
+        baseName === 'index' ? '' : path.posix.sep + baseName
     ) + path.posix.sep;
 
     nunjucksEnvironment.addGlobal('APP', options.context);
@@ -151,6 +159,11 @@ module.exports = function HtmlLoader() {
         const templateSource = nunjucksGetSource.call(this, filename);
         if (!(templateSource && templateSource.src)) {
             return templateSource;
+        }
+        if (SVG_PATTERN.test(filename)) {
+            return Object.assign({}, templateSource, {
+                src: `{{ require(${JSON.stringify(slash(filename))}) }}`,
+            });
         }
         if (!frontMatter.test(templateSource.src)) {
             return templateSource;
@@ -173,7 +186,9 @@ module.exports = function HtmlLoader() {
         });
     };
 
-    logger.info(`processing '${path.relative(__dirname, loaderContext.resourcePath)}'`);
+    const relativePath = slash(path.relative(__dirname, loaderContext.resourcePath));
+    logger.info(`render(${JSON.stringify(relativePath)})`);
+
     nunjucksEnvironment.render(loaderContext.resourcePath, {}, (error, result) => {
         if (error) {
             loaderCallback(error);

@@ -1,4 +1,6 @@
 const path = require('path');
+const glob = require('glob');
+const slash = require('slash');
 
 const DEBUG = ('DEBUG' in process.env && parseInt(process.env.DEBUG, 10) > 0);
 const DEV_SERVER = path.basename(require.main.filename, '.js') === 'webpack-dev-server';
@@ -25,6 +27,28 @@ if (PROD && DEBUG) {
     throw new Error(`Dont use ENV.NODE_ENV=${NODE_ENV} and ENV.DEBUG=${DEBUG} together`);
 }
 
+const SITEMAP = glob.sync(`${slash(SOURCE_PATH)}/**/*.html`, {
+    ignore: [
+        `${slash(SOURCE_PATH)}/partials/**/*.html`,
+    ],
+}).map((i) => {
+    const basename = path.basename(i, '.html');
+    const template = slash(path.relative(__dirname, i));
+    const filename = slash(basename === 'index' ? path.join(
+        path.relative(SOURCE_PATH, i),
+    ) : path.join(
+        path.relative(SOURCE_PATH, path.dirname(i)),
+        basename,
+        'index.html',
+    ));
+    const url = slash(path.dirname(filename)) + path.posix.sep;
+    return {
+        template,
+        filename,
+        url: (url === './' ? '' : url),
+    };
+});
+
 module.exports = {
     DEBUG,
     DEV_SERVER,
@@ -37,5 +61,7 @@ module.exports = {
     SOURCE_PATH,
     OUTPUT_PATH,
     PACKAGE_NAME,
+    BROWSERSLIST: browserslist,
     BROWSERS: browserslist[NODE_ENV],
+    SITEMAP,
 };

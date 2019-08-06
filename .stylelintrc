@@ -26,7 +26,15 @@
         "scss/at-import-no-partial-leading-underscore": true,
         "scss/at-mixin-argumentless-call-parentheses": "always",
         "scss/selector-no-redundant-nesting-selector": true,
+        "order/order": [
+           "dollar-variables",
+           "custom-properties"
+        ],
         "order/properties-alphabetical-order": false,
+        "plugin/rational-order": [true, {
+            "border-in-box-model": false,
+            "empty-line-between-groups": true
+        }],
         "property-no-unknown": [true, {
             "ignoreProperties": [
                 "font-range", "min-font-size", "max-font-size", "lower-font-range", "upper-font-range",
@@ -36,8 +44,12 @@
         }],
         "selector-pseudo-element-no-unknown": [true, {
             "ignorePseudoElements": [
-                "at-least", "at-most", "between", "exactly",
-                "track", "thumb"
+                "at-least",
+                "at-most",
+                "between",
+                "exactly",
+                "thumb",
+                "track"
             ]
         }],
         "selector-no-qualifying-type": [true, {
@@ -45,11 +57,37 @@
         }],
         "plugin/no-low-performance-animation": [true, {
             "severity": "warning",
-            "ignore": ["opacity", "transform", "color", "background", "background-position", "background-color", "border-color", "fill", "stroke-dashoffset", "width", "height"]
+            "ignore": [
+                "background",
+                "background-color",
+                "background-position",
+                "border-color",
+                "color",
+                "fill",
+                "height",
+                "opacity",
+                "stroke-dashoffset",
+                "transform",
+                "width"
+            ]
         }],
         "plugin/no-unsupported-browser-features": [true, {
             "severity": "warning",
-            "ignore": ["calc", "rem", "flexbox", "viewport-units", "font-unicode-range", "multicolumn", "outline", "will-change", "css-sticky", "css-featurequeries", "pointer-events", "transforms3d"]
+            "ignore": [
+                "calc",
+                "css-featurequeries",
+                "css-gradients",
+                "css-sticky",
+                "flexbox",
+                "font-unicode-range",
+                "multicolumn",
+                "outline",
+                "pointer-events",
+                "rem",
+                "transforms3d",
+                "viewport-units",
+                "will-change"
+            ]
         }]
     }
 }

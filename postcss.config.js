@@ -1,7 +1,4 @@
 /* eslint global-require: "off" */
-// const sortCSSmq = require('sort-css-media-queries');
-
-const APP = require('./app.config.js');
 const ENV = require('./app.env.js');
 
 module.exports = {
@@ -16,14 +13,13 @@ module.exports = {
             require('postcss-focus-within')(),
             require('pleeease-filters')(),
             require('postcss-image-set-polyfill')(),
-            ...(APP.CSS_INLINE_URL ? [require('./postcss.inline-url.js')()] : []),
             require('postcss-custom-properties')(),
             require('postcss-font-display')({ display: 'swap' }),
             require('postcss-object-fit-images')(),
             require('postcss-flexbugs-fixes')(),
             require('postcss-will-change')(),
-            // require('css-mqpacker')({ sort: sortCSSmq.desktopFirst }),
-            require('autoprefixer')({ browsers: ENV.BROWSERS }), // this always last
+            require('./postcss.webp.js')(),
+            require('autoprefixer')({ overrideBrowserslist: ENV.BROWSERS }), // this always last
             require('cssnano')({
                 preset: ['default', {
                     discardComments: { removeAll: true },
